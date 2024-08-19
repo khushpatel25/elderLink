@@ -1,0 +1,135 @@
+stages:
+  - build
+  - test
+  - quality
+  - publish
+  - deploy
+
+backend_build:
+  image: maven:latest
+  stage: build
+  tags:
+    - elderlink
+  script:
+    - cd backend
+    - echo "Building Backend Application..."
+    - ./mvnw clean package
+    - echo "Backend Build Complete"
+  artifacts:
+    paths:
+      - backend/target
+
+frontend_build:
+  image: node:latest
+  stage: build
+  tags:
+    - elderlink
+  script:
+    - echo "Building Frontend Application..."
+    - cd frontend
+    - npm install
+    - npm i react-icons
+    - npm run build
+    - ls -a
+    - echo "Frontend Build Complete"
+  artifacts:
+    paths:
+      - frontend/build
+
+test:
+  image: maven:latest
+  stage: test
+  tags:
+    - elderlink
+  script:
+    - echo "Backend Testing Started..."
+    - cd backend
+    - ./mvnw test
+    - echo "Backend Testing Complete"
+
+quality:
+  stage: quality
+  image: openjdk:11
+  script:
+    - echo "Compiling the project"
+    - cd backend
+    - rm -rf code_smells || true
+    - mkdir code_smells/
+    - java -jar DesigniteJava.jar -i . -o code_smells || true
+  artifacts:
+    paths:
+      - backend/code_smells/*.csv
+    expire_in: 1 week
+
+publish:
+  image: docker:latest
+  stage: publish
+  tags:
+    - elderlink
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_HOST: "tcp://docker:2375"
+  services:
+    - docker:dind
+  script:
+    - pwd
+    - echo $SERVER_IP
+    - docker --version
+    - docker login -u $DOCKER_HUB_USER -p $DOCKER_HUB_PWD docker.io
+
+    - cd backend/
+    - docker build -t docker.io/$DOCKER_HUB_USERNAME/elderlink-backend:latest .
+    - docker push docker.io/$DOCKER_HUB_USERNAME/elderlink-backend:latest
+
+    - cd ..
+
+    - cd frontend/
+    - docker build -t docker.io/$DOCKER_HUB_USERNAME/elderlink-frontend:latest .
+    - docker push docker.io/$DOCKER_HUB_USERNAME/elderlink-frontend:latest
+    - cd ..
+    - ls -a
+    
+  only:
+    - main
+
+deploy-backend:
+  image: alpine:latest
+  stage: deploy
+  tags:
+    - elderlink
+  script:
+    - cd backend/
+    - echo "Deploying Backend..."
+    - chmod og-rwx $ID_RSA
+    - apk update && apk add openssh-client sshpass
+    - sudo apt-get install sshpass || true
+    - which ssh || true
+    - which sshpass || true
+
+    - sshpass -p "dalw24" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker login -u $DOCKER_HUB_USER -p $DOCKER_HUB_PWD docker.io"
+    - sshpass -p "dalw24" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker pull docker.io/$DOCKER_HUB_USERNAME/elderlink-backend:latest"
+    - sshpass -p "dalw24" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker container rm -f elderlink-backend || true"
+    - sshpass -p "dalw24" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker run -d -p 8080:8080 --name elderlink-backend docker.io/$DOCKER_HUB_USERNAME/elderlink-backend:latest"
+    - sshpass -p "dalw24" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker images -a"
+    - sshpass -p "dalw24" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "docker container ls -a"
+
+  only:
+    - main
+
+deploy-frontend:
+  image: alpine:latest
+  stage: deploy
+  tags:
+    - elderlink
+  script:
+    - echo "Deploying application..."
+    - chmod og-rwx $ID_RSA
+    - echo "Frontend Build Files Transfer in progress!"
+    - apk update && apk add openssh-client sshpass
+    - ls -a
+    - sshpass -p "dalw24" ssh -o StrictHostKeyChecking=no $SERVER_USER@$SERVER_IP "rm -r /var/www/html/*" || true
+    - sshpass -p "dalw24" scp -o StrictHostKeyChecking=no -r -v frontend/build/* ${SERVER_USER}@${SERVER_IP}:/var/www/html
+    - echo "Frontend Deplyoment Complete!"
+
+  only:
+    - main
